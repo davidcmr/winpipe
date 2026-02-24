@@ -4,22 +4,41 @@ namespace Winpipe.Sound;
 public class Audio : IDisposable
 {
     private readonly WasapiLoopbackCapture _capture;
-    private readonly WaveFileWriter _writer;
+    private readonly Stream _outStream;
     private SilenceOut _silenceOut;
-
-    public Audio()
+    private bool _disposed;
+    public int SampleRate => _capture.WaveFormat.SampleRate;
+    public int Channels => _capture.WaveFormat.Channels;
+    public int BitsPerSample => _capture.WaveFormat.BitsPerSample;
+    public string Format
     {
-        var outputFolder = Path.Combine(Directory.GetCurrentDirectory(), ".winpipe-audio");
-        Directory.CreateDirectory(outputFolder);
-        var outputFilePath = Path.Combine(outputFolder, $"recorded-{DateTime.Now:yyyyMMdd_HHmmss}.wav");
+        get
+        {
+            return (_capture.WaveFormat.Encoding, _capture.WaveFormat.BitsPerSample) switch
+            {
+                (WaveFormatEncoding.Pcm, 16) => "s16le",
+                (WaveFormatEncoding.Pcm, 24) => "s24le",
+                (WaveFormatEncoding.Pcm, 32) => "s32le",
+                (WaveFormatEncoding.IeeeFloat, 32) => "f32le",
+                (WaveFormatEncoding.IeeeFloat, 64) => "f64le",
+                _ => throw new InvalidOperationException($"Unsupported format: {Encoding} {BitsPerSample}"),
+            };
+        }
+    }
+
+    public WaveFormatEncoding Encoding => _capture.WaveFormat.Encoding;
+
+    public Audio(Stream outStream)
+    {
         _capture = new WasapiLoopbackCapture();
-        _writer = new WaveFileWriter(outputFilePath, _capture.WaveFormat);
+        _outStream = outStream;
         _silenceOut = new SilenceOut(_capture.WaveFormat);
     }
 
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
     {
-        _writer.Write(e.Buffer, 0, e.BytesRecorded);
+        try { _outStream.Write(e.Buffer, 0, e.BytesRecorded); }
+        catch (Exception) { }
     }
 
     public void StartRecording(CancellationToken cancellationToken = default)
@@ -49,8 +68,11 @@ public class Audio : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
         _silenceOut.Dispose();
-        _writer.Dispose();
+        _outStream.Dispose();
         _capture.Dispose();
+        _disposed = true;
+        GC.SuppressFinalize(this);
     }
 }

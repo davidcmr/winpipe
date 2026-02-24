@@ -2,4 +2,4 @@ bin
 obj
 .vscode
 .env
-.winpipe-audio
+.winpipe-*
