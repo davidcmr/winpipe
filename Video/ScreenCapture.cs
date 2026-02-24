@@ -5,29 +5,27 @@ namespace Winpipe.Video;
 public class ScreenCapture : IDisposable
 {
     private readonly Screen _screen;
-    private Process? _ffmpeg;
-    private Stream? _ffmpegStdin;
-    private string _outputPath;
+    private readonly Stream _videoStream;
+    private readonly long _frameIntervalTicks;
     private bool _disposed;
 
     public int Width => _screen.Width;
     public int Height => _screen.Height;
-    public string OutputPath => _outputPath;
+    public int Fps { get; }
 
-    public ScreenCapture(string? outputPath = null)
+    public ScreenCapture(Stream videoStream, int fps = 30)
     {
+        if (fps <= 10 || fps > 120) throw new ArgumentOutOfRangeException(nameof(fps), fps, "FPS must be between 10 and 120");
         _screen = new Screen();
-        _outputPath = outputPath ?? string.Empty;
-        if (string.IsNullOrEmpty(_outputPath))
-        {
-            var dir = Path.Combine(Directory.GetCurrentDirectory(), ".winpipe-video");
-            Directory.CreateDirectory(dir);
-            _outputPath = Path.Combine(dir, $"screen-{DateTime.Now:yyyyMMdd_HHmmss}.mp4");
-        }
+        _videoStream = videoStream;
+        Fps = fps;
+        // Convert to ticks: 1 second / fps = TimeSpan.TicksPerSecond / fps
+        _frameIntervalTicks = TimeSpan.TicksPerSecond / fps;
     }
 
     /// <summary>
-    /// Start recording: capture frames, pipe to ffmpeg, block until cancelled.
+    /// Capture frames and write raw BGRA to the stream (e.g. video named pipe).
+    /// Caller owns the stream; this method does not close or dispose it.
     /// </summary>
     public void StartRecording(CancellationToken cancellationToken = default)
     {
@@ -37,68 +35,65 @@ public class ScreenCapture : IDisposable
             firstFrame = _screen.CaptureFrame(100);
             if (firstFrame != null) break;
             cancellationToken.ThrowIfCancellationRequested();
-            Thread.Sleep(50);
+            cancellationToken.WaitHandle.WaitOne(50);
         }
 
         if (firstFrame == null)
             throw new InvalidOperationException("No frame acquired; is the desktop visible?");
 
-        int w = _screen.Width;
-        int h = _screen.Height;
-
-        var startInfo = new ProcessStartInfo
-        {
-            FileName = "ffmpeg",
-            Arguments = $"-y -f rawvideo -pix_fmt bgra -s {w}x{h} -r 30 -i pipe:0 -c:v libx264 -pix_fmt yuv420p \"{_outputPath}\"",
-            UseShellExecute = false,
-            RedirectStandardInput = true,
-            RedirectStandardError = true,
-            CreateNoWindow = true,
-        };
-
-        _ffmpeg = Process.Start(startInfo);
-        if (_ffmpeg == null)
-            throw new InvalidOperationException("Failed to start ffmpeg. Is it on PATH?");
-
-        _ffmpegStdin = _ffmpeg.StandardInput.BaseStream;
-
         try
         {
-            _ffmpegStdin.Write(firstFrame, 0, firstFrame.Length);
-
-            const int frameIntervalMs = 33; // ~30 fps
-            var sw = Stopwatch.StartNew();
-            byte[]? lastFrame = firstFrame;
-
-            while (!cancellationToken.IsCancellationRequested)
-            {
-                var frame = _screen.CaptureFrame(0);
-                if (frame != null)
-                    lastFrame = frame;
-                if (lastFrame != null)
-                    _ffmpegStdin.Write(lastFrame, 0, lastFrame.Length);
-
-                var elapsed = sw.ElapsedMilliseconds;
-                var next = (int)((elapsed / frameIntervalMs + 1) * frameIntervalMs - elapsed);
-                if (next > 0)
-                    cancellationToken.WaitHandle.WaitOne(Math.Min(next, 100));
-            }
+            _videoStream.Write(firstFrame, 0, firstFrame.Length);
+            _videoStream.Flush();
         }
-        finally
+        catch (Exception ex)
         {
-            _ffmpegStdin?.Close();
-            _ffmpegStdin = null;
-            _ffmpeg?.WaitForExit(5000);
+            Console.WriteLine($"Failed to write first frame to video stream: {ex.Message}");
+        }
+
+        var sw = Stopwatch.StartNew();
+        byte[] lastFrame = firstFrame;
+        long nextWriteTicks = _frameIntervalTicks;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            // Capture frames as fast as possible (non-blocking) - no delays here
+            var frame = _screen.CaptureFrame(0);
+            if (frame != null)
+                lastFrame = frame;
+
+            // Convert elapsed time to TimeSpan ticks for comparison
+            long elapsedTicks = sw.Elapsed.Ticks;
+
+            // Write frame at exactly the target FPS (every frameIntervalTicks)
+            if (elapsedTicks >= nextWriteTicks)
+            {
+                try
+                {
+                    _videoStream.Write(lastFrame, 0, lastFrame.Length);
+                    _videoStream.Flush();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Failed to write frame to video stream: {ex.Message}");
+                }
+                nextWriteTicks += _frameIntervalTicks;
+            }
+
+            // Only sleep if we're ahead of schedule - otherwise keep capturing
+            long sleepTicks = nextWriteTicks - elapsedTicks;
+            if (sleepTicks > TimeSpan.TicksPerMillisecond) // 1ms in ticks
+            {
+                int sleepMs = (int)(sleepTicks / TimeSpan.TicksPerMillisecond);
+                cancellationToken.WaitHandle.WaitOne(Math.Min(sleepMs, 1)); // Max 1ms sleep
+            }
+            // If sleepTicks <= 1ms, don't sleep - keep the loop tight for maximum capture rate
         }
     }
 
     public void Dispose()
     {
         if (_disposed) return;
-        _ffmpegStdin?.Close();
-        _ffmpegStdin = null;
-        _ffmpeg?.Dispose();
-        _ffmpeg = null;
         _screen.Dispose();
         _disposed = true;
         GC.SuppressFinalize(this);

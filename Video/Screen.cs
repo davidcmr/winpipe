@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Vortice.Direct3D11;
 using Vortice.DXGI;
 
@@ -10,12 +11,13 @@ public sealed class Screen : IDisposable
     private readonly IDXGIOutput _output;
     private readonly IDXGIOutput1 _output1;
     private ID3D11Texture2D? _stagingTexture;
-    private int _width;
-    private int _height;
+    private int _timeoutMs = 1000;
+    private uint _width;  // Store as uint to match desc.Width type
+    private uint _height; // Store as uint to match desc.Height type
     private bool _disposed;
 
-    public int Width => _width;
-    public int Height => _height;
+    public int Width => (int)_width;  // Cast only when accessed
+    public int Height => (int)_height; // Cast only when accessed
 
     /// <summary>
     /// Captures from the first output (monitor) of the default adapter.
@@ -31,8 +33,15 @@ public sealed class Screen : IDisposable
         _output = output;
         _output1 = _output.QueryInterface<IDXGIOutput1>();
         _duplication = _output1.DuplicateOutput(_deviceResources.Device);
-        _width = 0;
-        _height = 0;
+        var sw = Stopwatch.StartNew();
+        while ((_width == 0 || _height == 0) && sw.ElapsedMilliseconds < _timeoutMs)
+        {
+            var frame = CaptureFrame(100);
+            if (frame != null && _width > 0 && _height > 0) break;
+            Thread.Sleep(50);
+        }
+        if (_width == 0 || _height == 0)
+            throw new InvalidOperationException("Failed to get screen size");
     }
 
     /// <summary>
@@ -68,8 +77,8 @@ public sealed class Screen : IDisposable
                     BindFlags = BindFlags.None,
                     CPUAccessFlags = CpuAccessFlags.Read
                 });
-                _width = (int)desc.Width;
-                _height = (int)desc.Height;
+                _width = desc.Width;   // No cast needed!
+                _height = desc.Height;  // No cast needed!
             }
 
             _deviceResources.Context.CopyResource(_stagingTexture, texture);
@@ -77,17 +86,22 @@ public sealed class Screen : IDisposable
             var box = _deviceResources.Context.Map(_stagingTexture!, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
             try
             {
-                int rowPitch = (int)box.RowPitch;
-                int size = rowPitch * (int)desc.Height;
+                uint rowPitch = box.RowPitch;  // No cast needed!
+                uint widthBytes = _width * 4;  // BGRA = 4 bytes per pixel, no cast!
+                uint size = widthBytes * _height;  // No cast!
                 var buffer = new byte[size];
                 unsafe
                 {
                     fixed (byte* pDest = buffer)
                     {
                         var pSrc = (byte*)box.DataPointer;
-                        for (int y = 0; y < desc.Height; y++)
+                        for (uint y = 0; y < _height; y++)  // Use uint in loop
                         {
-                            Buffer.MemoryCopy(pSrc + y * rowPitch, pDest + y * box.RowPitch, box.RowPitch, box.RowPitch);
+                            Buffer.MemoryCopy(
+                                pSrc + y * rowPitch,      // Source: start of row (may have padding)
+                                pDest + y * widthBytes,   // Dest: start of row (no padding)
+                                widthBytes,                // Copy only actual pixel data
+                                widthBytes);
                         }
                     }
                 }
