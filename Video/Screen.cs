@@ -3,7 +3,7 @@ using Vortice.DXGI;
 
 namespace Winpipe.Video;
 
-public sealed class ScreenCapture : IDisposable
+public sealed class Screen : IDisposable
 {
     private readonly DeviceResources _deviceResources;
     private readonly IDXGIOutputDuplication _duplication;
@@ -20,11 +20,11 @@ public sealed class ScreenCapture : IDisposable
     /// <summary>
     /// Captures from the first output (monitor) of the default adapter.
     /// </summary>
-    public ScreenCapture() : this(0, 0) { }
+    public Screen() : this(0, 0) { }
 
     /// <param name="adapterIndex">Adapter index (GPU).</param>
     /// <param name="outputIndex">Output index (monitor).</param>
-    public ScreenCapture(int adapterIndex, int outputIndex)
+    public Screen(int adapterIndex, int outputIndex)
     {
         _deviceResources = new DeviceResources();
         _deviceResources.Adapter.EnumOutputs((uint)outputIndex, out IDXGIOutput output);
