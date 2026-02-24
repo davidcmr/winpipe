@@ -1,6 +1,7 @@
 using NAudio.Wave;
+namespace Winpipe.Sound;
 
-class Audio : IDisposable
+public class Audio : IDisposable
 {
     private readonly WasapiLoopbackCapture _capture;
     private readonly WaveFileWriter _writer;
